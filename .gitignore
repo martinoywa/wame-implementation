@@ -1,3 +1,7 @@
-1.pdf
 .ipynb_checkpoints/
 *.docx
+__pycache__/
+MNIST*
+WAME/
+*.ipynb
+*.csv

@@ -14,19 +14,19 @@ class WAME(Optimizer):
             (default: (0.1, 1.2))
         step_sizes (Tuple[float, float], optional): a pair of minimal and
             maximal allowed step sizes (default: (0.01, 100))
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
     """
 
-    def __init__(self, params, alpha=0.9, etas=(0.1, 1.2), step_sizes=(0.01, 100), weight_decay=0):
+    def __init__(self, params, alpha=0.9, etas=(0.1, 1.2), step_sizes=(0.01, 100)):
         if not 0.0 <= alpha:
             raise ValueError(f"Invalid theta: {alpha}")
         if not 0.0 < etas[0] < 1.0 < etas[1]:
             raise ValueError(f"Invalid eta values: {etas[0]}, {etas[1]}")
-        if not 0.0 <= weight_decay:
-            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
 
-        defaults = dict(theta=alpha, etas=etas, step_sizes=step_sizes, weight_decay=weight_decay)
+        defaults = dict(alpha=alpha, etas=etas, step_sizes=step_sizes)
         super(WAME, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+         super(WAME, self).__setstate__(state)
 
 
     @torch.no_grad()
@@ -46,15 +46,17 @@ class WAME(Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                grad = p.grad
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError('WAME does not support sparse gradients')
                 state = self.state[p]
 
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
-                    state["theta"] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                    state["z"] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                    state["prev"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["prev"] = torch.zeros_like(p.data)
+                    state["theta"] = torch.zeros_like(p.data)
+                    state["z"] = torch.zeros_like(p.data)
                     state["step_size"] = grad.new().resize_as_(grad).fill_(1)
 
                 etaminus, etaplus = group["etas"]
@@ -62,27 +64,26 @@ class WAME(Optimizer):
                 alpha = group["alpha"]
                 step_size = state["step_size"]
                 theta = state["theta"]
-                Z = state["z"]
+                z = state["z"]
+
+                #print(state)
 
                 state["step"] += 1
 
-                if grad.mul(state["prev"]) > 0:
+                mul_dx = grad.mul(state["prev"])
+
+                if mul_dx > 0:
                     step_size = min(step_size*etaplus, step_size_max)
-                elif grad.mul(state["prev"]) < 0:
+                elif mul_dx < 0:
                     step_size = max(step_size*etaminus, step_size_min)
 
-                Z = alpha * Z + (1 - alpha) * step_size
+                z = alpha * z + (1 - alpha) * step_size
                 theta = alpha * theta + (1 - alpha) * (grad ** 2)
 
-                weight_decay = group["weight_decay"] # λ
-
-                #if weight_decay != 0:
-                grad = -(weight_decay * Z * grad * (1 / theta))
-                #else:
-                #    grad = -(Z * grad * (1 / theta))
+                new_grad = (z * grad) * (1 / theta)
 
                 # update paramenters
-                p.add_(grad, value=-1)
+                p.sub_(new_grad)
 
                 state["prev"].copy_(grad)
 
